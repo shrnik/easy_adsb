@@ -1,0 +1,201 @@
+"""
+find_pings.py — Stream adsb.lol split-tar releases and print ADS-B pings
+                near a given lat/lon without any intermediate files.
+
+Usage:
+    python find_pings.py --lat 43.0755143 --lon -89.4154526 --radius 0.5
+
+    # Wider radius, save to CSV:
+    python find_pings.py --lat 43.0755143 --lon -89.4154526 --radius 1.0 --out out.csv
+
+    # Limit to first N matching rows (handy for quick tests):
+    python find_pings.py --lat 43.0755143 --lon -89.4154526 --radius 0.5 --limit 100
+"""
+
+import argparse
+import csv
+import gzip
+import io
+import json
+import subprocess
+import sys
+import tarfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+DATA_DIR = Path("data")
+
+COLUMNS = [
+    "timestamp", "icao", "registration", "flight",
+    "lat", "lon", "altitude_baro", "alt_geom", "ground_speed", "track_degrees",
+    "vertical_rate", "aircraft_type", "description", "operator",
+    "squawk", "category", "source_type",
+]
+
+
+def _f(val):
+    try:
+        return float(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _s(val):
+    return str(val).strip() if val is not None else None
+
+
+def stream_pings(parts, lat_min, lat_max, lon_min, lon_max):
+    """Yield one dict per matching trace point, streaming through the tar."""
+    cat = subprocess.Popen(
+        ["cat"] + [str(p) for p in parts],
+        stdout=subprocess.PIPE,
+    )
+    tf = tarfile.open(fileobj=cat.stdout, mode="r|")
+
+    try:
+        for member in tf:
+            if not member.name.startswith("./traces/") or not member.name.endswith(".json"):
+                continue
+
+            f = tf.extractfile(member)
+            if f is None:
+                continue
+
+            raw = f.read()
+            try:
+                data = json.loads(gzip.decompress(raw))
+            except Exception:
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+
+            base_ts  = data.get("timestamp", 0)
+            icao     = _s(data.get("icao", "").lower())
+            reg      = _s(data.get("r"))
+            atype    = _s(data.get("t"))
+            desc     = _s(data.get("desc"))
+            operator = _s(data.get("ownOp"))
+
+            for pt in data.get("trace", []):
+                if not isinstance(pt, list) or len(pt) < 3:
+                    continue
+
+                lat = _f(pt[1])
+                lon = _f(pt[2])
+                if lat is None or lon is None:
+                    continue
+                if not (lat_min <= lat <= lat_max and lon_min <= lon <= lon_max):
+                    continue
+
+                offset = _f(pt[0])
+                if offset is None:
+                    continue
+                ts = datetime.fromtimestamp(int(base_ts + offset), tz=timezone.utc)
+
+                ac = pt[8] if len(pt) > 8 and isinstance(pt[8], dict) else {}
+
+                yield {
+                    "timestamp":     ts.isoformat(),
+                    "icao":          icao,
+                    "registration":  reg,
+                    "flight":        _s(ac.get("flight")) or None,
+                    "lat":           lat,
+                    "lon":           lon,
+                    "altitude_baro": _f(pt[3]) if len(pt) > 3 else None,
+                    "alt_geom":      _f(pt[10]) if len(pt) > 10 else None,
+                    "ground_speed":  _f(pt[4]) if len(pt) > 4 else None,
+                    "track_degrees": _f(pt[5]) if len(pt) > 5 else None,
+                    "vertical_rate": _f(pt[7]) if len(pt) > 7 else None,
+                    "aircraft_type": atype,
+                    "description":   desc,
+                    "operator":      operator,
+                    "squawk":        _s(ac.get("squawk")),
+                    "category":      _s(ac.get("category")),
+                    "source_type":   _s(pt[9]) if len(pt) > 9 else None,
+                }
+    finally:
+        tf.close()
+        cat.stdout.close()
+        cat.wait()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Find ADS-B pings near a lat/lon")
+    parser.add_argument("--lat",    type=float, required=True,  help="Center latitude")
+    parser.add_argument("--lon",    type=float, required=True,  help="Center longitude")
+    parser.add_argument("--radius", type=float, default=0.5,    help="±degrees (default 0.5)")
+    parser.add_argument("--limit",  type=int,   default=0,      help="Stop after N rows (0=all)")
+    parser.add_argument("--out",    type=str,   default=None,   help="Write CSV to file")
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    args = parser.parse_args()
+
+    parts = sorted(args.data_dir.glob("*.tar.??"))
+    if not parts:
+        sys.exit(f"No *.tar.?? files found in {args.data_dir}")
+
+    lat_min = args.lat - args.radius
+    lat_max = args.lat + args.radius
+    lon_min = args.lon - args.radius
+    lon_max = args.lon + args.radius
+
+    print(f"Searching {len(parts)} tar part(s) for pings in:")
+    print(f"  lat [{lat_min:.4f}, {lat_max:.4f}]  lon [{lon_min:.4f}, {lon_max:.4f}]")
+    if args.limit:
+        print(f"  (stopping after {args.limit} matches)")
+    print()
+
+    out_file = None
+    writer   = None
+
+    if args.out:
+        out_file = open(args.out, "w", newline="")
+        writer   = csv.DictWriter(out_file, fieldnames=COLUMNS)
+        writer.writeheader()
+
+    # Column widths for terminal display
+    widths = {
+        "timestamp": 25, "icao": 8, "registration": 10, "flight": 8,
+        "lat": 12, "lon": 12, "altitude_baro": 8, "ground_speed": 7,
+        "track_degrees": 6, "vertical_rate": 6,
+        "aircraft_type": 5, "description": 20, "operator": 20,
+        "squawk": 6, "category": 4, "source_type": 12,
+    }
+    # Only show the most useful columns on screen
+    display_cols = [
+        "timestamp", "icao", "registration", "flight",
+        "lat", "lon", "altitude_baro", "ground_speed",
+    ]
+
+    if not args.out:
+        header = "  ".join(c.ljust(widths[c]) for c in display_cols)
+        print(header)
+        print("-" * len(header))
+
+    count = 0
+    try:
+        for row in stream_pings(parts, lat_min, lat_max, lon_min, lon_max):
+            if writer:
+                writer.writerow({k: row.get(k) for k in COLUMNS})
+            else:
+                print("  ".join(
+                    str(row.get(c, "") or "").ljust(widths[c])
+                    for c in display_cols
+                ))
+
+            count += 1
+            if args.limit and count >= args.limit:
+                break
+    except KeyboardInterrupt:
+        print("\n[interrupted]")
+
+    if out_file:
+        out_file.close()
+
+    print(f"\nTotal pings found: {count:,}")
+    if args.out:
+        print(f"Saved → {args.out}")
+
+
+if __name__ == "__main__":
+    main()
