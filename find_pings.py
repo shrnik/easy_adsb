@@ -5,6 +5,9 @@ find_pings.py — Stream adsb.lol split-tar releases and print ADS-B pings
 Usage:
     python find_pings.py --lat 43.0755143 --lon -89.4154526 --radius 0.5
 
+    # Specific date (files named v2026.02.05-planes-readsb-prod-0.tar.aa …):
+    python find_pings.py --lat 43.0755143 --lon -89.4154526 --radius 0.5 --date 2026-02-05
+
     # Wider radius, save to CSV:
     python find_pings.py --lat 43.0755143 --lon -89.4154526 --radius 1.0 --out out.csv
 
@@ -127,19 +130,32 @@ def main():
     parser.add_argument("--radius", type=float, default=0.5,    help="±degrees (default 0.5)")
     parser.add_argument("--limit",  type=int,   default=0,      help="Stop after N rows (0=all)")
     parser.add_argument("--out",    type=str,   default=None,   help="Write CSV to file")
+    parser.add_argument("--include-helicopters", default=False, help="Include rotorcraft (category A7)")
+    parser.add_argument("--date",     type=str,   default=None,   help="Filter to a specific date YYYY-MM-DD (e.g. 2026-02-05)")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     args = parser.parse_args()
 
-    parts = sorted(args.data_dir.glob("*.tar.??"))
-    if not parts:
-        sys.exit(f"No *.tar.?? files found in {args.data_dir}")
+    if args.date:
+        try:
+            date_obj = datetime.strptime(args.date, "%Y-%m-%d")
+        except ValueError:
+            sys.exit(f"Invalid --date '{args.date}': expected YYYY-MM-DD")
+        date_glob = f"v{date_obj.strftime('%Y.%m.%d')}-*.tar.??"
+        parts = sorted(args.data_dir.glob(date_glob))
+        if not parts:
+            sys.exit(f"No parts found for date {args.date} (pattern: {date_glob}) in {args.data_dir}")
+    else:
+        parts = sorted(args.data_dir.glob("*.tar.??"))
+        if not parts:
+            sys.exit(f"No *.tar.?? files found in {args.data_dir}")
 
     lat_min = args.lat - args.radius
     lat_max = args.lat + args.radius
     lon_min = args.lon - args.radius
     lon_max = args.lon + args.radius
 
-    print(f"Searching {len(parts)} tar part(s) for pings in:")
+    date_label = f" [{args.date}]" if args.date else ""
+    print(f"Searching {len(parts)} tar part(s){date_label} for pings in:")
     print(f"  lat [{lat_min:.4f}, {lat_max:.4f}]  lon [{lon_min:.4f}, {lon_max:.4f}]")
     if args.limit:
         print(f"  (stopping after {args.limit} matches)")
@@ -175,6 +191,8 @@ def main():
     count = 0
     try:
         for row in stream_pings(parts, lat_min, lat_max, lon_min, lon_max):
+            if row.get("category") == "A7" and not args.include_helicopters:
+                continue
             if writer:
                 writer.writerow({k: row.get(k) for k in COLUMNS})
             else:
@@ -184,6 +202,8 @@ def main():
                 ))
 
             count += 1
+            if args.out:
+                print(f"\r  {count:,} pings written...", end="", flush=True)
             if args.limit and count >= args.limit:
                 break
     except KeyboardInterrupt:
@@ -191,8 +211,9 @@ def main():
 
     if out_file:
         out_file.close()
+        print()  # newline after running counter
 
-    print(f"\nTotal pings found: {count:,}")
+    print(f"Total pings found: {count:,}")
     if args.out:
         print(f"Saved → {args.out}")
 
