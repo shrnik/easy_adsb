@@ -42,8 +42,9 @@ def gh_get(url: str, token: str | None) -> dict | list:
 
 def find_release_assets(repo: str, date: str, variant: str, token: str | None) -> list[dict]:
     """
-    Return the list of asset dicts for the release matching
+    Return the list of tar asset dicts for the release matching
     v{date}-planes-readsb-{variant} in the given repo.
+    Returns an empty list if the release is not found or has no assets.
     """
     tag = f"v{date}-planes-readsb-{variant}"
     url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
@@ -52,17 +53,13 @@ def find_release_assets(repo: str, date: str, variant: str, token: str | None) -
         release = gh_get(url, token)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            sys.exit(
-                f"Release not found: {tag}\n"
-                f"  Check the date, variant, and repo.\n"
-                f"  Available variants: prod-0, staging-0, mlatonly-0\n"
-                f"  Repo used: {repo}  (override with --repo)"
-            )
+            print(f"  Release not found: {tag}")
+            return []
+        if e.code == 403:
+            print(f"  Rate-limited (403) for {tag}. Use --token to increase limits.")
+            return []
         raise
-    assets = release.get("assets", [])
-    if not assets:
-        sys.exit(f"Release {tag} has no assets.")
-    return assets
+    return [a for a in release.get("assets", []) if ".tar" in a["name"]]
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +139,12 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Discover assets via GitHub API
-    assets = find_release_assets(repo, dot_date, args.variant, args.token)
-
-    tar_assets = [a for a in assets if ".tar" in a["name"]]
+    tar_assets = find_release_assets(repo, dot_date, args.variant, args.token)
     if not tar_assets:
-        sys.exit("No .tar assets found in this release.")
+        sys.exit(
+            f"No .tar assets found. Check the date, variant ({args.variant}), and repo ({repo}).\n"
+            f"  Available variants: prod-0, staging-0, mlatonly-0"
+        )
 
     print(f"Found {len(tar_assets)} part(s):")
     for a in tar_assets:

@@ -18,7 +18,6 @@ Usage:
 import argparse
 import csv
 import gzip
-import io
 import json
 import math
 import subprocess
@@ -205,39 +204,12 @@ def main():
         writer   = csv.DictWriter(out_file, fieldnames=COLUMNS)
         writer.writeheader()
 
-    # Column widths for terminal display
-    widths = {
-        "timestamp": 25, "icao": 8, "registration": 10, "flight": 8,
-        "lat": 12, "lon": 12, "altitude_baro": 8, "ground_speed": 7,
-        "track_degrees": 6, "vertical_rate": 6,
-        "aircraft_type": 5, "description": 20, "operator": 20,
-        "squawk": 6, "category": 4, "source_type": 12,
-    }
-    # Only show the most useful columns on screen
-    display_cols = [
-        "timestamp", "icao", "registration", "flight",
-        "lat", "lon", "altitude_baro", "ground_speed",
-    ]
-
-    if not args.out:
-        header = "  ".join(c.ljust(widths[c]) for c in display_cols)
-        print(header)
-        print("-" * len(header))
-
     count = 0
     try:
         for row in stream_pings(parts, lat_min, lat_max, lon_min, lon_max, args.lat, args.lon, args.max_dist, args.min_alt):
             if writer:
                 writer.writerow({k: row.get(k) for k in COLUMNS})
-            else:
-                print("  ".join(
-                    str(row.get(c, "") or "").ljust(widths[c])
-                    for c in display_cols
-                ))
-
             count += 1
-            if args.out:
-                print(f"\r  {count:,} pings written...", end="", flush=True)
             if args.limit and count >= args.limit:
                 break
     except KeyboardInterrupt:
@@ -245,7 +217,6 @@ def main():
 
     if out_file:
         out_file.close()
-        print()  # newline after running counter
 
     print(f"Total pings found: {count:,}")
     if args.out:
