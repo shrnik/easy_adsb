@@ -91,7 +91,7 @@ def main():
     # Location
     parser.add_argument("--lat",      type=float, required=True, help="Center latitude")
     parser.add_argument("--lon",      type=float, required=True, help="Center longitude")
-    parser.add_argument("--radius",   type=float, default=0.5,
+    parser.add_argument("--radius",   type=float, default=1,
                         help="Bounding-box half-size in degrees (default 0.5)")
     parser.add_argument("--max-dist", type=float, default=161.0,
                         help="Max haversine distance in km (default 161)")
