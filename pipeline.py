@@ -18,6 +18,11 @@ Usage:
     python pipeline.py --start-date 2026-02-01 --end-date 2026-02-03 \\
         --lat 43.0755 --lon -89.415 --token ghp_xxxx --out out.csv
 
+    # With timezone and time window:
+    python pipeline.py --start-date 2026-02-05 --end-date 2026-02-05 \\
+        --lat 43.0755 --lon -89.415 --tz America/Chicago \\
+        --start-time 08:00 --end-time 17:00 --out daytime.csv
+
     # Only download, skip ping search:
     python pipeline.py --start-date 2026-02-01 --end-date 2026-02-03 \\
         --lat 0 --lon 0 --download-only
@@ -32,8 +37,9 @@ import argparse
 import csv
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from download import download_file, find_release_assets, repo_for_date
 from find_pings import COLUMNS, group_parts_by_archive, stream_pings
@@ -98,6 +104,14 @@ def main():
     parser.add_argument("--min-alt",  type=float, default=None,
                         help="Minimum altitude_baro in feet")
 
+    # Time filtering
+    parser.add_argument("--tz",         type=str, default=None,
+                        help="Timezone for --start-time/--end-time and output (e.g. America/Chicago)")
+    parser.add_argument("--start-time", type=str, default=None,
+                        help="Start time HH:MM within each day (requires --tz)")
+    parser.add_argument("--end-time",   type=str, default=None,
+                        help="End time HH:MM within each day (requires --tz)")
+
     # Output
     parser.add_argument("--out",   type=str, default=None, help="Save pings to CSV")
     parser.add_argument("--limit", type=int, default=0,    help="Stop after N pings (0=all)")
@@ -124,6 +138,31 @@ def main():
             sys.exit(f"Invalid {label} '{val}': expected YYYY-MM-DD")
     if args.start_date > args.end_date:
         sys.exit("--start-date must be <= --end-date")
+
+    # Resolve timezone
+    display_tz = None
+    if args.tz:
+        try:
+            display_tz = ZoneInfo(args.tz)
+        except KeyError:
+            sys.exit(f"Unknown timezone '{args.tz}'. Use IANA names like America/Chicago, US/Eastern, Europe/London.")
+
+    if (args.start_time or args.end_time) and not args.tz:
+        sys.exit("--start-time / --end-time require --tz")
+
+    # Parse time bounds (applied per-day in the search loop)
+    start_time_obj = None
+    end_time_obj = None
+    if args.start_time:
+        try:
+            start_time_obj = datetime.strptime(args.start_time, "%H:%M").time()
+        except ValueError:
+            sys.exit(f"Invalid --start-time '{args.start_time}': expected HH:MM")
+    if args.end_time:
+        try:
+            end_time_obj = datetime.strptime(args.end_time, "%H:%M").time()
+        except ValueError:
+            sys.exit(f"Invalid --end-time '{args.end_time}': expected HH:MM")
 
     dates = list(date_range(args.start_date, args.end_date))
     args.data_dir.mkdir(parents=True, exist_ok=True)
@@ -155,8 +194,24 @@ def main():
     # ------------------------------------------------------------------
     # Step 2: Find pings
     # ------------------------------------------------------------------
+    tz_label = f", tz={args.tz}" if args.tz else ""
     print(f"\n=== Ping search: lat={args.lat}, lon={args.lon}, "
-          f"radius={args.radius}°, max-dist={args.max_dist} km ===")
+          f"radius={args.radius}°, max-dist={args.max_dist} km{tz_label} ===")
+
+    # Compute UTC time window across the full date range
+    utc_start = None
+    utc_end = None
+    if display_tz:
+        start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+        st = start_time_obj or datetime.min.time()
+        et = end_time_obj or datetime.min.time()
+
+        utc_start = datetime.combine(start_date, st, tzinfo=display_tz).astimezone(timezone.utc)
+        if end_time_obj:
+            utc_end = datetime.combine(end_date, et, tzinfo=display_tz).astimezone(timezone.utc)
+        else:
+            utc_end = datetime.combine(end_date + timedelta(days=1), et, tzinfo=display_tz).astimezone(timezone.utc)
 
     lat_min = args.lat - args.radius
     lat_max = args.lat + args.radius
@@ -164,6 +219,8 @@ def main():
     lon_max = args.lon + args.radius
     alt_str = f"  min alt {args.min_alt:.0f} ft" if args.min_alt is not None else ""
     print(f"  lat [{lat_min:.4f}, {lat_max:.4f}]  lon [{lon_min:.4f}, {lon_max:.4f}]{alt_str}")
+    if utc_start and utc_end:
+        print(f"  UTC window: {utc_start.isoformat()} to {utc_end.isoformat()}")
     if args.limit:
         print(f"  (stopping after {args.limit} matches)")
     print()
@@ -186,6 +243,7 @@ def main():
             for row in stream_pings(
                 group, lat_min, lat_max, lon_min, lon_max,
                 args.lat, args.lon, args.max_dist, args.min_alt,
+                utc_start, utc_end, display_tz,
             ):
                 if writer:
                     writer.writerow({k: row.get(k) for k in COLUMNS})
