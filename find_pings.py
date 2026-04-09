@@ -308,6 +308,9 @@ def main():
                 if writer:
                     writer.writerow({k: row.get(k) for k in COLUMNS})
                 count += 1
+                if count % 100 == 0:
+                    sys.stderr.write(f"\r  pings: {count}")
+                    sys.stderr.flush()
                 if args.limit and count >= args.limit:
                     done = True
                     break
@@ -315,6 +318,10 @@ def main():
                 break
     except KeyboardInterrupt:
         print("\n[interrupted]")
+
+    if count > 0:
+        sys.stderr.write(f"\r  pings: {count:,}\n")
+        sys.stderr.flush()
 
     if out_file:
         out_file.close()
