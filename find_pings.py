@@ -20,9 +20,11 @@ import csv
 import gzip
 import json
 import math
+import re
 import subprocess
 import sys
 import tarfile
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -154,6 +156,22 @@ def stream_pings(parts, lat_min, lat_max, lon_min, lon_max, center_lat, center_l
         cat.wait()
 
 
+def group_parts_by_archive(parts):
+    """Group tar split parts by their archive prefix.
+
+    Files like v2026.02.05-planes-readsb-prod-0.tar.aa and .tar.ab share the
+    prefix "v2026.02.05-planes-readsb-prod-0.tar" and belong to one archive.
+    Each group must be cat-ed together independently.
+    """
+    groups = defaultdict(list)
+    for p in parts:
+        # Strip the two-letter split suffix (.aa, .ab, …) to get the archive key
+        key = re.sub(r'\.[a-z]{2}$', '', p.name)
+        groups[key].append(p)
+    # Return groups sorted by key so dates are processed in order
+    return [sorted(groups[k]) for k in sorted(groups)]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Find ADS-B pings near a lat/lon")
     parser.add_argument("--lat",    type=float, required=True,  help="Center latitude")
@@ -177,11 +195,11 @@ def main():
             sys.exit(f"No parts found for date {args.date} (pattern: {date_glob}) in {args.data_dir}")
     else:
         parts = sorted(args.data_dir.glob("*.tar.??"))
-        # print file names
-        for part in parts:
-            print(f"Found part: {part.name}")
         if not parts:
             sys.exit(f"No *.tar.?? files found in {args.data_dir}")
+
+    archive_groups = group_parts_by_archive(parts)
+    total_parts = sum(len(g) for g in archive_groups)
 
     lat_min = args.lat - args.radius
     lat_max = args.lat + args.radius
@@ -189,7 +207,7 @@ def main():
     lon_max = args.lon + args.radius
 
     date_label = f" [{args.date}]" if args.date else ""
-    print(f"Searching {len(parts)} tar part(s){date_label} for pings in:")
+    print(f"Searching {total_parts} tar part(s) across {len(archive_groups)} archive(s){date_label} for pings in:")
     alt_str = f"  min alt {args.min_alt:.0f} ft" if args.min_alt is not None else ""
     print(f"  lat [{lat_min:.4f}, {lat_max:.4f}]  lon [{lon_min:.4f}, {lon_max:.4f}]  max dist {args.max_dist:.0f} km{alt_str}")
     if args.limit:
@@ -205,12 +223,18 @@ def main():
         writer.writeheader()
 
     count = 0
+    done = False
     try:
-        for row in stream_pings(parts, lat_min, lat_max, lon_min, lon_max, args.lat, args.lon, args.max_dist, args.min_alt):
-            if writer:
-                writer.writerow({k: row.get(k) for k in COLUMNS})
-            count += 1
-            if args.limit and count >= args.limit:
+        for i, group in enumerate(archive_groups, 1):
+            print(f"Processing archive {i}/{len(archive_groups)}: {group[0].name} … ({len(group)} part(s))")
+            for row in stream_pings(group, lat_min, lat_max, lon_min, lon_max, args.lat, args.lon, args.max_dist, args.min_alt):
+                if writer:
+                    writer.writerow({k: row.get(k) for k in COLUMNS})
+                count += 1
+                if args.limit and count >= args.limit:
+                    done = True
+                    break
+            if done:
                 break
     except KeyboardInterrupt:
         print("\n[interrupted]")

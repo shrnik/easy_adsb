@@ -36,7 +36,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from download import download_file, find_release_assets, repo_for_date
-from find_pings import COLUMNS, stream_pings
+from find_pings import COLUMNS, group_parts_by_archive, stream_pings
 
 DATA_DIR = Path("data")
 
@@ -175,18 +175,27 @@ def main():
         writer   = csv.DictWriter(out_file, fieldnames=COLUMNS)
         writer.writeheader()
 
+    archive_groups = group_parts_by_archive(all_parts)
+    print(f"  {len(archive_groups)} archive(s) to search\n")
+
     count = 0
+    done = False
     try:
-        for row in stream_pings(
-            all_parts, lat_min, lat_max, lon_min, lon_max,
-            args.lat, args.lon, args.max_dist, args.min_alt,
-        ):
-            if writer:
-                writer.writerow({k: row.get(k) for k in COLUMNS})
-            count += 1
-            if count % 1_000 == 0:
-                print(f"  {count:,} pings found so far...", end="\r", flush=True)
-            if args.limit and count >= args.limit:
+        for i, group in enumerate(archive_groups, 1):
+            print(f"  Archive {i}/{len(archive_groups)}: {group[0].name} … ({len(group)} part(s))")
+            for row in stream_pings(
+                group, lat_min, lat_max, lon_min, lon_max,
+                args.lat, args.lon, args.max_dist, args.min_alt,
+            ):
+                if writer:
+                    writer.writerow({k: row.get(k) for k in COLUMNS})
+                count += 1
+                if count % 1_000 == 0:
+                    print(f"  {count:,} pings found so far...", end="\r", flush=True)
+                if args.limit and count >= args.limit:
+                    done = True
+                    break
+            if done:
                 break
     except KeyboardInterrupt:
         print("\n[interrupted]")
