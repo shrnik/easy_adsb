@@ -13,6 +13,12 @@ Usage:
 
     # Limit to first N matching rows (handy for quick tests):
     python find_pings.py --lat 43.0755143 --lon -89.4154526 --radius 0.5 --limit 100
+
+    # Date in a specific timezone (loads the correct UTC tar files automatically):
+    python find_pings.py --lat 43.0755143 --lon -89.4154526 --date 2026-02-05 --tz America/Chicago
+
+    # Time window within a day in local time:
+    python find_pings.py --lat 43.0755143 --lon -89.4154526 --date 2026-02-05 --tz America/Chicago --start-time 08:00 --end-time 17:00
 """
 
 import argparse
@@ -191,7 +197,7 @@ def main():
     parser.add_argument("--limit",  type=int,   default=0,      help="Stop after N rows (0=all)")
     parser.add_argument("--out",    type=str,   default=None,   help="Write CSV to file")
     parser.add_argument("--max-dist", type=float, default=161.0, help="Max haversine distance in km (default 100)")
-    parser.add_argument("--min-alt",  type=float, default=None,  help="Minimum altitude_baro in feet (exclude lower/ground)")
+    parser.add_argument("--min-alt",  type=float, default=25000,  help="Minimum altitude_baro in feet (exclude lower/ground)")
     parser.add_argument("--date",     type=str,   default=None,   help="Filter to a specific date YYYY-MM-DD (e.g. 2026-02-05)")
     parser.add_argument("--tz",       type=str,   default=None,   help="Timezone for --date and output (e.g. America/Chicago, US/Eastern)")
     parser.add_argument("--start-time", type=str, default=None,   help="Start time HH:MM within --date (requires --tz and --date)")
