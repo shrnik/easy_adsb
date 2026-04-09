@@ -25,8 +25,9 @@ import subprocess
 import sys
 import tarfile
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 DATA_DIR = Path("data")
 
@@ -74,8 +75,12 @@ def _s(val):
     return str(val).strip() if val is not None else None
 
 
-def stream_pings(parts, lat_min, lat_max, lon_min, lon_max, center_lat, center_lon, max_dist_km, min_alt_ft=None):
-    """Yield one dict per matching trace point, streaming through the tar."""
+def stream_pings(parts, lat_min, lat_max, lon_min, lon_max, center_lat, center_lon, max_dist_km, min_alt_ft=None, utc_start=None, utc_end=None, display_tz=None):
+    """Yield one dict per matching trace point, streaming through the tar.
+
+    utc_start/utc_end: if set, only yield pings whose UTC timestamp falls in [start, end).
+    display_tz: if set, output timestamps converted to this timezone.
+    """
     cat = subprocess.Popen(
         ["cat"] + [str(p) for p in parts],
         stdout=subprocess.PIPE,
@@ -129,10 +134,16 @@ def stream_pings(parts, lat_min, lat_max, lon_min, lon_max, center_lat, center_l
                     continue
                 ts = datetime.fromtimestamp(int(base_ts + offset), tz=timezone.utc)
 
+                if utc_start is not None and ts < utc_start:
+                    continue
+                if utc_end is not None and ts >= utc_end:
+                    continue
+
+                display_ts = ts.astimezone(display_tz) if display_tz else ts
                 ac = pt[8] if len(pt) > 8 and isinstance(pt[8], dict) else {}
 
                 yield {
-                    "timestamp":     ts.isoformat(),
+                    "timestamp":     display_ts.isoformat(),
                     "icao":          icao,
                     "registration":  reg,
                     "flight":        _s(ac.get("flight")) or None,
@@ -182,17 +193,74 @@ def main():
     parser.add_argument("--max-dist", type=float, default=161.0, help="Max haversine distance in km (default 100)")
     parser.add_argument("--min-alt",  type=float, default=None,  help="Minimum altitude_baro in feet (exclude lower/ground)")
     parser.add_argument("--date",     type=str,   default=None,   help="Filter to a specific date YYYY-MM-DD (e.g. 2026-02-05)")
+    parser.add_argument("--tz",       type=str,   default=None,   help="Timezone for --date and output (e.g. America/Chicago, US/Eastern)")
+    parser.add_argument("--start-time", type=str, default=None,   help="Start time HH:MM within --date (requires --tz and --date)")
+    parser.add_argument("--end-time",   type=str, default=None,   help="End time HH:MM within --date (requires --tz and --date)")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     args = parser.parse_args()
+
+    # Resolve timezone
+    display_tz = None
+    if args.tz:
+        try:
+            display_tz = ZoneInfo(args.tz)
+        except KeyError:
+            sys.exit(f"Unknown timezone '{args.tz}'. Use IANA names like America/Chicago, US/Eastern, Europe/London.")
+
+    if (args.start_time or args.end_time) and not (args.date and args.tz):
+        sys.exit("--start-time / --end-time require both --date and --tz")
+
+    # Compute UTC time window and determine which date(s) of tar files to load
+    utc_start = None
+    utc_end = None
+
     if args.date:
         try:
             date_obj = datetime.strptime(args.date, "%Y-%m-%d")
         except ValueError:
             sys.exit(f"Invalid --date '{args.date}': expected YYYY-MM-DD")
-        date_glob = f"v{date_obj.strftime('%Y.%m.%d')}-*.tar.??"
-        parts = sorted(args.data_dir.glob(date_glob))
-        if not parts:
-            sys.exit(f"No parts found for date {args.date} (pattern: {date_glob}) in {args.data_dir}")
+
+        if display_tz:
+            # Build local start/end in the given timezone
+            local_date = date_obj.date()
+            if args.start_time:
+                try:
+                    st = datetime.strptime(args.start_time, "%H:%M").time()
+                except ValueError:
+                    sys.exit(f"Invalid --start-time '{args.start_time}': expected HH:MM")
+            else:
+                st = datetime.min.time()  # 00:00
+
+            if args.end_time:
+                try:
+                    et = datetime.strptime(args.end_time, "%H:%M").time()
+                except ValueError:
+                    sys.exit(f"Invalid --end-time '{args.end_time}': expected HH:MM")
+            else:
+                et = datetime.min.time()  # next day 00:00
+
+            utc_start = datetime.combine(local_date, st, tzinfo=display_tz).astimezone(timezone.utc)
+            if args.end_time:
+                utc_end = datetime.combine(local_date, et, tzinfo=display_tz).astimezone(timezone.utc)
+            else:
+                utc_end = datetime.combine(local_date + timedelta(days=1), et, tzinfo=display_tz).astimezone(timezone.utc)
+
+            # Collect tar files for all UTC dates that overlap the window
+            parts = []
+            d = utc_start.date()
+            while d <= utc_end.date():
+                dg = f"v{d.strftime('%Y.%m.%d')}-*.tar.??"
+                parts.extend(args.data_dir.glob(dg))
+                d += timedelta(days=1)
+            parts = sorted(set(parts))
+            if not parts:
+                sys.exit(f"No tar files found for UTC dates {utc_start.date()} – {utc_end.date()} in {args.data_dir}")
+        else:
+            # No timezone — just load the literal date
+            date_glob = f"v{date_obj.strftime('%Y.%m.%d')}-*.tar.??"
+            parts = sorted(args.data_dir.glob(date_glob))
+            if not parts:
+                sys.exit(f"No parts found for date {args.date} (pattern: {date_glob}) in {args.data_dir}")
     else:
         parts = sorted(args.data_dir.glob("*.tar.??"))
         if not parts:
@@ -207,7 +275,10 @@ def main():
     lon_max = args.lon + args.radius
 
     date_label = f" [{args.date}]" if args.date else ""
-    print(f"Searching {total_parts} tar part(s) across {len(archive_groups)} archive(s){date_label} for pings in:")
+    tz_label = f" tz={args.tz}" if args.tz else ""
+    print(f"Searching {total_parts} tar part(s) across {len(archive_groups)} archive(s){date_label}{tz_label} for pings in:")
+    if utc_start and utc_end:
+        print(f"  UTC window: {utc_start.isoformat()} to {utc_end.isoformat()}")
     alt_str = f"  min alt {args.min_alt:.0f} ft" if args.min_alt is not None else ""
     print(f"  lat [{lat_min:.4f}, {lat_max:.4f}]  lon [{lon_min:.4f}, {lon_max:.4f}]  max dist {args.max_dist:.0f} km{alt_str}")
     if args.limit:
@@ -227,7 +298,7 @@ def main():
     try:
         for i, group in enumerate(archive_groups, 1):
             print(f"Processing archive {i}/{len(archive_groups)}: {group[0].name} … ({len(group)} part(s))")
-            for row in stream_pings(group, lat_min, lat_max, lon_min, lon_max, args.lat, args.lon, args.max_dist, args.min_alt):
+            for row in stream_pings(group, lat_min, lat_max, lon_min, lon_max, args.lat, args.lon, args.max_dist, args.min_alt, utc_start, utc_end, display_tz):
                 if writer:
                     writer.writerow({k: row.get(k) for k in COLUMNS})
                 count += 1
